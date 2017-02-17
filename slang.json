@@ -1,0 +1,194 @@
+[
+ [
+  "^anti(?!dote?|fire|\\++|[ \\-]*venom)",
+  "antipoison"
+ ],
+ [
+  "^anti.*?(\\+{1,2}[^+]*)",
+  "antidote%s"
+ ],
+ [
+  "^anti.*?veno?m?(.*)",
+  "anti-venom %s"
+ ],
+ [
+  "^.*?e?x.*?anti(?:f?i?r?e?)(.*)",
+  "extended antifire %s"
+ ],
+ [
+  "^rang[ie]?.*?pot(?:[^\\d]*)(.*)",
+  "ranging potion %s"
+ ],
+ [
+  "^mag[ie]?.*?pot(?:[^\\d]*)(.*)",
+  "magic potion %s"
+ ],
+ [
+  "cm?b ?p[ots]*",
+  "combat potion"
+ ],
+ [
+  "scombat",
+  "super combat"
+ ],
+ [
+  "c[' ]?bow",
+  "crossbow"
+ ],
+ [
+  "p[' ]?hat$",
+  "partyhat"
+ ],
+ [
+  "b[' ]?staff",
+  "battlestaff"
+ ],
+ [
+  "c[' ]?ball",
+  "cannonball"
+ ],
+ [
+  "b[' ]?axe?",
+  "battleaxe"
+ ],
+ [
+  "t[' le]*port",
+  "teleport"
+ ],
+ [
+  "blk",
+  "black"
+ ],
+ [
+  "addy",
+  "adamant"
+ ],
+ [
+  "pl8",
+  "plate"
+ ],
+ [
+  "abby",
+  "abyssal"
+ ],
+ [
+  "scimm?y?",
+  "scimitar"
+ ],
+ [
+  "tally",
+  "talisman"
+ ],
+ [
+  "hally",
+  "halberd"
+ ],
+ [
+  "brassy",
+  "brassard"
+ ],
+ [
+  "tassy",
+  "tasset"
+ ],
+ [
+  "cammy",
+  "camelot"
+ ],
+ [
+  "ammy",
+  "amulet"
+ ],
+ [
+  "fally",
+  "falador"
+ ],
+ [
+  "swordy",
+  "swordfish"
+ ],
+ [
+  "frem\\w+",
+  "fremennik"
+ ],
+ [
+  "emmy",
+  "emerald"
+ ],
+ [
+  "hatchet",
+  "axe"
+ ],
+ [
+  "lob[byies]*",
+  "lobster"
+ ],
+ [
+  "^gs",
+  "godsword"
+ ],
+ [
+  "\\btab$",
+  "teleport"
+ ],
+ [
+  "tots?\\b",
+  "potato"
+ ],
+ [
+  "[ber ]*[zs]erk\\w*",
+  "berserker"
+ ],
+ [
+  "fungi?",
+  "fung"
+ ],
+ [
+  "\\barmor\\b",
+  "armour"
+ ],
+ [
+  "\\bmold\\b",
+  "mould"
+ ],
+ [
+  "\\bsaber\\b",
+  "sabre"
+ ],
+ [
+  "\\bmiter\\b",
+  "mitre"
+ ],
+ [
+  "(?x)\n        ^z(?:\\b|am[my]*)\n        (?=\\ (?:\n        armo|brac|brew|chap|cloa|coif|croz|dhid|drag|full|gods|\n        grap|hast|hilt|kite|mit[er]|mix|mjol|page|plat|robe|spea|stol))\n     ",
+  "zamorak"
+ ],
+ [
+  "rune (ore|bar|bolt|lim|crossbow ?\\(?u\\)?)",
+  "runite %s"
+ ],
+ [
+  "^(?:3|third) ?a[ge]*",
+  "3rd age"
+ ],
+ [
+  "(?x)\n(dart|arrow|bolt|karil|ahrim|verac|torag|dharok|guthan)\n\\'*s*\n",
+  "%s"
+ ],
+ [
+  "(?:black) mysti?c?(.*)",
+  "mystic %s (dark)"
+ ],
+ [
+  "(?:white) mysti?c?(.*)",
+  "mystic %s (light)"
+ ],
+ [
+  " +",
+  " "
+ ],
+ [
+  "(\\w*?)(\\d+)\\b",
+  "%s %s"
+ ]
+]

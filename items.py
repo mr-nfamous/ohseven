@@ -1,6 +1,14 @@
-##"""Just about everything useful about Oldschool Runescape items.    
-##
-##"""
+"""Everything you'll ever need to know about Oldschool Runescape items.
+
+The `Items` container has a very powerful search engine, capable of correctly
+parsing even the most ridiculous queries in sub millisecond speed.
+
+The state is dumpable and can be resumed upon the next session. Price
+caching will prioritize getting the Grand Exchange prices of items
+that rarely make it into the OsBuddy api, so at least one of the two
+price values should become available quickly.
+
+"""
 import pickle
 import zlib
 import os
@@ -44,16 +52,24 @@ class CouldntReadConfigWarning(Warning):
     super().__init__(f"Couldn't load {section!r} from config file.")
     
 class Data:
+  """Manager for the plethora of data files and settings required"""
   _name          = __name__.encode()
+
+  # threading is involved, this is to be absolutely sure a file isn't being
+  # written while it's being read
   _busy          = False  
   @classmethod
   def add_missing_files(cls):
+    """Add missing fils to the .ohseven.data directory"""
     files = [cls.item_data, cls.cache_priority, cls.abbreviations,
              cls.slang, cls.metaitems]
     *(cls.get_dir(file, make_dir=True, make_file=True) for file in files),
     
   @classmethod
   def get_dir(cls, filename, make_dir=False, make_file=False):
+
+    # based on IDLE's config. not sure how this works on any operating system
+    # other than windows...
     user_dir = os.path.expanduser('~')
     user_dir = os.path.join(user_dir, DATA_DIRECTORY)
     if not os.path.exists(user_dir):
@@ -142,12 +158,12 @@ class Data:
     return json.loads(data)
   
 with open(Data.get_dir('config.ini', make_dir=True, make_file=True)) as file:
-  config = configparser.ConfigParser()
-  config.read_file(file)
+  Data._config = configparser.ConfigParser()
+  Data._config.read_file(file)
   try:
-    Data.osb_price_api  = config['urls']['osb_price_api']
-    Data.ge_price_api   = config['urls']['ge_price_api']
-    Data.ge_catalogue   = config['urls']['ge_catalogue']
+    Data.osb_price_api  = Data._config['urls']['osb_price_api']
+    Data.ge_price_api   = Data._config['urls']['ge_price_api']
+    Data.ge_catalogue   = Data._config['urls']['ge_catalogue']
   except configparser.InterpolationSyntaxError:
     m = ("string interpolations '%s' in config file must be escaped with "
          "another %,  ie '.../graph/%%s.json'")
@@ -160,10 +176,10 @@ with open(Data.get_dir('config.ini', make_dir=True, make_file=True)) as file:
     Data.ge_catalogue   = ('http://services.runescape.com/m=itemdb_oldschool'
                            '/api/catalogue/detail.json?item=%s')
   try:
-    Data.item_data      = config['filenames']['item_data']
-    Data.abbreviations  = config['filenames']['abbreviations']
-    Data.slang          = config['filenames']['slang']
-    Data.metaitems      = config['filenames']['metaitems']
+    Data.item_data      = Data._config['filenames']['item_data']
+    Data.abbreviations  = Data._config['filenames']['abbreviations']
+    Data.slang          = Data._config['filenames']['slang']
+    Data.metaitems      = Data._config['filenames']['metaitems']
   except:
     warnings.warn(CouldntReadConfigWarning('filenames'))
     Data.item_data      = 'itemdb.zip'
@@ -172,12 +188,10 @@ with open(Data.get_dir('config.ini', make_dir=True, make_file=True)) as file:
     Data.metaitems      = 'metaitems.json'
 
   try:
-    Data.max_osb_price_age = int(config['settings']['max_osb_price_age'])
+    Data.max_osb_price_age = int(Data._config['settings']['max_osb_price_age'])
   except:
     warnings.warn(CouldntReadConfigWarning('settings'))
     Data.max_osb_price_age = 86400
-  Data._config = config
-  del config
 
 class ItemProperty:
   
@@ -225,7 +239,7 @@ class ItemMeta(type):
     return self
   
 class Item(metaclass=ItemMeta):
-  """Oldschool runescape item
+  """An Oldschool runescape item
 
 """
   id                = ItemProperty(dumpable=False)
@@ -303,11 +317,15 @@ class Item(metaclass=ItemMeta):
       raise IllegalItemAttributeError(name=type(self).__name__, attr=attr)
     self.__dict__[attr] = val
 
-  def restore_default(self, property):
-    """Restore an item's property to its default value"""
-    
-    assert property in self._mutable_properties
-    setattr(self, property, getattr(type(self), property).default)
+  def restore_default(self, property, *properties, all_props=False):
+    """Restore an item's property or properties to its default value(s)"""
+    if all_props:
+      props = self._mutable_properties
+    else:      
+      props = (property, *properties) if properties else (property,)
+    assert all(p in self._mutable_properties for p in props)
+    for p in props:
+      setattr(self, p, getattr(type(self), p).default)
 
 class ItemsMeta(type):
   def __new__(metacls, cls, bases, namespace):
@@ -337,6 +355,7 @@ class ItemsMeta(type):
     return len(self._data)
 
   def _delete(self, item):
+    """Delete an item and all references to it in the hash map"""
     if item not in self:
       raise ValueError('cannot delete something that is not there.')
     hashval = hash(item)
@@ -367,7 +386,7 @@ class Items(metaclass=ItemsMeta):
 
   @classmethod
   def restore_defaults(cls, *properties, all_props=False, itemcls=Item):
-    """Restore some Item properties back to their default values en masse"""
+    """Apply Item.restore_default to all items"""
     if all_props:
       properties = itemcls._mutable_properties
     assert all(arg in itemcls._mutable_properties for arg in properties)
@@ -383,6 +402,7 @@ class Items(metaclass=ItemsMeta):
 
   @classmethod
   def _dumps(cls):
+    """Convert all items to to dictionary for easy pickling"""
     return {i.id:i._dump() for i in cls}
   
   @classmethod
@@ -390,8 +410,6 @@ class Items(metaclass=ItemsMeta):
     """Search the Oldschool Runescape item database
 
 `query` can be an acronym, abbreviation, or n-gram.
-
-Without a cache hit, searches take at worst 500 µs, but usually only 1-2 µs.
 
 Examples:
   search("ags")       -> [Armadyl godsword]
@@ -403,10 +421,9 @@ Examples:
     if r:
       r = [i.lower().capitalize() for i in r]
       return [cls[i] for i in r]
-    return r
 
   @classmethod
-  def _ge_cacher(cls, last_ge_update, frequency=10, batch_size=5):
+  def _ge_cache_loop(cls, last_ge_update, frequency=10, batch_size=5):
     _last_cache_update = 0
     while True:
       
@@ -423,7 +440,6 @@ Examples:
           response = ge_lookup(*missing)
           for itemid, data in response.items():
             if data['time'] != last_ge_update:
-              print('fail your')
               cls.restore_defaults('ge_price', 'last_ge_update')
               _ge_lookup.cache_clear()
               last_ge_update = data['time']
@@ -432,35 +448,33 @@ Examples:
             cls[itemid].ge_price       = data['price']
             cls[itemid].last_ge_update = data['time']
             GeCache.add(itemid)
-        except:
-          print('failed to cache ge prices')
-          raise
+        except Exception as e:
+          print(f'failed to cache ge price of item with id={itemid}')
+          raise e
         else:
           _last_cache_update = time.time()
           
   @classmethod
-  def _osb_cacher(cls, frequency=2000):
-    last_osb_update = 0
+  def _osb_cache_loop(cls, frequency=2000):
+    last_update = 0
     while True:
-      if time.time() - last_osb_update > frequency:        
-        try:
-          response        = osb_lookup()
-          missing = [i for i in response if i not in cls]
-          if missing:
-            cls.download_new_items(missing)
-          last_osb_update = int(time.time())
-          for itemid, price in response.items():
-            if price:
-              cls[itemid].osb_price       = price
-              cls[itemid].last_osb_update = last_osb_update
-              OsbCache.add(itemid)
-            else:
-              cls[itemid].ge_cache_priority += 1
-              lou = cls[itemid].last_osb_update
-              if lou and (last_osb_update-lou > Data.max_osb_price_age):
-                cls.restore_defaults('osb_price', 'last_osb_update')
-        except:
-          pass
+      if time.time() - last_update > frequency:        
+        response        = osb_lookup()
+        missing = [i for i in response if i not in cls]
+        if missing:
+          cls.download_new_items(missing)
+        last_update = int(time.time())
+        for itemid, price in response.items():
+          if price:
+            cls[itemid].osb_price       = price
+            cls[itemid].last_osb_update = last_update
+            OsbCache.add(itemid)
+          else:
+            cls[itemid].ge_cache_priority += 1
+            if cls[itemid].last_osb_update:
+              delta = last_update - cls[itemid].last_osb_update
+              if delta > Data.max_osb_price_age:
+                cls[itemid].restore_default('osb_price', 'last_osb_update')
       yield
 
   @staticmethod
@@ -472,14 +486,14 @@ Examples:
       time.sleep(1.0)
       
   @classmethod
-  def start_cachers(cls, osb=True, osb_frequency=2000,
+  def start_caching(cls, osb=True, osb_frequency=2000,
                     ge=True, ge_frequency=10, ge_batch_size=5):
     cachers = []    
     if osb:
-      cachers.append(cls._osb_cacher(osb_frequency))
+      cachers.append(cls._osb_cache_loop(osb_frequency))
     if ge:
       gestart = ge_lookup(1965)[1965]['time']
-      cachers.append(cls._ge_cacher(gestart, ge_frequency, ge_batch_size))
+      cachers.append(cls._ge_cache_loop(gestart, ge_frequency, ge_batch_size))
     if not cachers:
       raise ValueError("no cachers present")    
     cls.cache_thread = threading.Thread(target=cls._cache_mainloop,
@@ -488,17 +502,18 @@ Examples:
     
   @classmethod
   def download_new_items(cls, items):
-    """Update the item database
+    """Download items and add them to the database
 
-called automatically when the osb cacher detects new items"""
+called automagically when the osb cacher detects new items"""
     dumped = cls._dumps()
     errors = []
     for item in items:
       if item in dumped:
         errors.append(item)
     if any(errors):
-      raise ValueError(
+      exception = ValueError(
         F"items already exist with ids: {', '.join(map(str,errors))}")
+      raise exception
     if len(items) > 30:
       raise ValueError('item list is too large (> 30 items not allowed)')
     data = osb_lookup('sp', 'members')
@@ -509,20 +524,16 @@ called automatically when the osb cacher detects new items"""
       data = _request(Data.ge_catalogue%i)
       response = data.json()['item']
       return i, {'desc':response['description'], 'name':response['name']}
-    Executor = concurrent.futures.ThreadPoolExecutor
-    with Executor(max_workers=len(items)) as executor:
-      try:
-        futures={executor.submit(getter, i): i for i in items}
-        for future in concurrent.futures.as_completed(futures):
-          k, resp = future.result()
-          data[k] = {**data[k], **resp}
-      except Exception as e:
-        raise e from None
+    with concurrent.futures.ThreadPoolExecutor(len(items)) as executor:
+      futures={executor.submit(getter, i): i for i in items}
+      for future in concurrent.futures.as_completed(futures):
+        k, resp = future.result()
+        data[k] = {**data[k], **resp}
     Data.dump_items({**dumped, **data})
     cls.load()
     print(f'downloaded {len(items)} new items...')
   
-
+## container for tests
 class Cache(set):
   def __new__(cls):
     return super().__new__(cls)  
@@ -538,7 +549,7 @@ _ge_request_successes= 0
 def ge_req_success():
   return _ge_request_attempts / max(1, _ge_request_successes)
 def _request(url, timeout=2, max_tries=3):
-  """Deprecated wrapper of request.get from when trying asyncio..."""
+  """Wrapper for request.get to handle occasional repeated timeouts"""
   counter = 0
   while counter < max_tries:
     try:
@@ -552,7 +563,7 @@ def _request(url, timeout=2, max_tries=3):
 @functools.lru_cache(maxsize=len(Items))
 def _ge_lookup(i, key=None):
   """All ge price lookups go through here in order to use the lru_cache.
-The cache should be cleared once a day, (and it is cleared automatically when
+The cache should be cleared once a day, (and it is cleared automagically while
 the caching thread is alive)"""
   global _ge_request_attempts, _ge_request_successes
   _ge_request_attempts += 1
@@ -574,7 +585,7 @@ will be severely throttled until requests per 10 mins drops below 6.
   if len(items) == 1 and isinstance(items[0], (list, tuple)):
     items = items[0]
   items = [int(item) for item in items]
-  with concurrent.futures.ThreadPoolExecutor(max_workers=len(items)) as executor:
+  with concurrent.futures.ThreadPoolExecutor(len(items)) as executor:
     futures = {executor.submit(_ge_lookup, i, **{'key':key}): i for i in items}
     for future in concurrent.futures.as_completed(futures):
       try:
@@ -585,6 +596,18 @@ will be severely throttled until requests per 10 mins drops below 6.
   return results
 
 def osb_lookup(*values):
+  """Download all data from the OsBuddy exchange
+
+`values` are specific fields. If blank it only returns the price.
+Valid `values` are:
+ * `id`
+ * `name`
+ * `sp` - item's general store price which is 5//3 * its high alch
+ * `overall_average - overall buying/selling price. this is what's used
+                      automatically
+ * `sell_average`
+ * `members` - item is member's only
+ """
   keys = ('overall_average',) if not values else values
   data = _request(Data.osb_price_api)
   data = data.json()

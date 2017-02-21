@@ -141,13 +141,13 @@ def setup(words, abbreviations, meta, slang_, sep='~',
         letter = item[0]
         letter_freqs[letter] += 1
     order    = ''.join(sorted(letter_freqs,key=letter_freqs.get, reverse=True))
-    print(len(order))
     by_close = *sorted(items, key=lambda item: order.index(item[0])),
     tok      = '*' if must_contain_all else ''
     by_close = *(f'{tok}{i}' for i in by_close),
     search_str = f'{sep}{sep.join(by_close)}{sep}'
     if (len(sep)>1) or  (sep in set(''.join(items))):
-        raise ValueError('"sep" {sep} cannot be used because it is within an item')
+        raise ValueError(
+            '"sep" {sep} cannot be used because it is within an item')
     # remove spaces and punctuation
     if must_contain_all:
         re.sub(f'[^\w{sep}*]', '', search_str)

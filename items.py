@@ -5,6 +5,7 @@ import zlib
 import pickle
 import threading
 import functools
+import warnings
 import configparser
 import concurrent.futures
 
@@ -15,7 +16,7 @@ from oh7 import search_engine
 
 DATA_DIRECTORY = '.ohseven.data'
 URLS           = ('osb_price_api', 'ge_price_api', 'ge_catalogue')
-FILES          = ('item_data', 'abbreviations', 'slang', 'metaitems')
+FILES          = ('item_data', 'abbreviations', 'slang', 'metaitems', 'backup')
 ITEM_SETTINGS  = ('max_osb_price_age', 'max_ge_price_age')
 OSB_IGNORE     = [8534, 8536, 8538, 8540, 8542, 8544, 8546, 8630, 8632,
                   8634, 8636, 8638, 8640, 8642, 8644, 8646, 8648]
@@ -89,11 +90,9 @@ class ItemProperty:
             self.setter = None
 
     def __get__(self, instance, cls):
-        if DEBUG: print('ItemProperty.__get__')
         return self if instance is None else instance.__dict__[self.name]
 
     def __set__(self, instance, value):
-        if DEBUG: print('ItemProperty.__set__')
         if self.name not in instance._set_properties or not self.read_only:
             if self.setter is not None:
                 value = self.setter(value)
@@ -203,7 +202,7 @@ class Item(metaclass=ItemMeta):
         return f'{type(self).__name__}({args})'
 
     def __setattr__(self, attr, value):
-        # allow sunder attributes or ItemProperties only
+        # only allow sunder/dunder attributes or ItemProperties to be set
         if attr.startswith('_') or attr in self._all_properties:
             super().__setattr__(attr, value)
         else:
@@ -230,10 +229,17 @@ class ItemsMeta(type):
 
     def load_item_data(self):
         """Load item data from disk"""
-
-        data = _ItemDataIO.load(CONFIG['filenames']['item_data'], 'rb')
-        data = zlib.decompress(data)
-        data = pickle.loads(data)
+        try:
+            assert 1==2
+            data = _ItemDataIO.load(CONFIG['filenames']['item_data'], 'rb')
+            data = zlib.decompress(data)
+            data = pickle.loads(data)
+        except:
+            warn = Warning(f"couldn't load {CONFIG['filenames']['item_data']}")
+            warnings.warn(warn)                
+            data = _ItemDataIO.load(CONFIG['filenames']['backup'], 'r')
+            data = json.loads(data)
+            data = {int(k):data[k] for k in data}        
         self._hash_map = {}
         self._data = {}
         for item in (Item(k, **data[k]) for k in data):
@@ -255,6 +261,7 @@ class ItemsMeta(type):
         """Reload the item search function
 
        Must be reloaded each time a new item is added"""
+        
         abbv_data  = _ItemDataIO.load(CONFIG['filenames']['abbreviations'], 'r')
         slang_data = _ItemDataIO.load(CONFIG['filenames']['slang'], 'r')
         meta_data  = _ItemDataIO.load(CONFIG['filenames']['metaitems'], 'r')
@@ -284,7 +291,7 @@ class ItemsMeta(type):
         regardless of age"""
 
         if not ignore_age_settings:
-            for item in self:
+            for item in filter(lambda i: i.ge_price, self):
                 if _delta(item.last_ge_update) > int(
                     CONFIG['item_settings']['max_ge_price_age']):
                     item.restore_defaults('ge_price', 'last_ge_update')
@@ -299,11 +306,10 @@ class ItemsMeta(type):
         regardless of age"""
 
         if not ignore_age_settings:
-            for item in self:
-                if item.last_osb_update is not None:
-                    if _delta(item.last_osb_update) > int(
-                        CONFIG['item_settings']['max_osb_price_age']):
-                        item.restore_defaults('osb_price', 'last_osb_update')
+            for item in filter(lambda i: i.osb_price, self):
+                if _delta(item.last_osb_update) > int(
+                    CONFIG['item_settings']['max_osb_price_age']):
+                    item.restore_defaults('osb_price', 'last_osb_update')
         else:
             self.restore_defaults('osb_price', 'last_osb_update')
         self.osb_cache = set(i.id for i in self if i.osb_price)
@@ -388,7 +394,7 @@ class ItemsMeta(type):
             nonlocal data
             response = _request(CONFIG['urls']['ge_catalogue']%itemid).json()
             data[itemid] = {**data[itemid],
-                                            **{'desc':response['item']['description']}}
+                            **{'desc':response['item']['description']}}
         with concurrent.futures.ThreadPoolExecutor(len(items)) as executor:
             futures = {executor.submit(description_getter, i):i for i in items}
             concurrent.futures.wait(futures)

@@ -1,151 +1,57 @@
-import os
-import json
-import time
-import zlib
-import pickle
-import threading
-import functools
-import warnings
-import configparser
-import concurrent.futures
 
+import itertools
+import json
+import operator
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import namedtuple
+from types import MappingProxyType
+
+import attr
 import requests
 
-from oh7 import exceptions
-from oh7 import search_engine
+from publicize import public, public_constants
 
-DATA_DIRECTORY = '.ohseven.data'
-URLS           = ('osb_price_api', 'ge_price_api', 'ge_catalogue')
-FILES          = ('item_data', 'abbreviations', 'slang', 'metaitems', 'backup')
-ITEM_SETTINGS  = ('max_osb_price_age', 'max_ge_price_age')
-OSB_IGNORE     = [8534, 8536, 8538, 8540, 8542, 8544, 8546, 8630, 8632,
-                  8634, 8636, 8638, 8640, 8642, 8644, 8646, 8648]
 
-DEBUG = 0
+if __name__ == '__main__':
+    from config import CONFIG, PATH
+    from search_engine import search_setup
+    from utils import *
+    from _errors import NonExistentItemError
+else:
+    from .config import CONFIG, PATH
+    from .search_engine import search_setup
+    from .utils import *
+    from ._errors import NonExistentItemError
+OSB_IGNORE     = ['8534', '8536', '8538', '8540', '8542', '8544', '8546',
+                  '8630', '8632', '8634', '8636', '8638', '8640', '8642',
+                  '8644', '8646', '8648']
 
-def _delta(then):
-    """Time since `then`"""
-    return time.time() - then
+@attr.s(hash=True)
+class Item:
+    id=attr.ib(hash=True)
+    name=attr.ib(hash=True)
+    desc=attr.ib()
+    alch=attr.ib()
+    membs=attr.ib()
+    ge_cache_priority=attr.ib(default=0)
 
-def get_data_directory():
-    path = os.path.expanduser('~')
-    path = os.path.join(path, DATA_DIRECTORY)
-    if not os.path.exists(path):
-        os.mkdir(path)
-    return path
+    def get_ge_info(self):
+        return ge_lookup(self.id)[self.id]
 
-def get_filename(filename):
-    path = f'{get_data_directory()}\\{filename}'
-    if not os.path.exists(path):
-        with open(path, 'w') as file:
-            pass
-    return path
-
-class _ItemDataIO:
-    """File i/o to prevent seperate threads opening the same file"""
-    busy = False
-
-    @classmethod
-    def load(cls, filename, mode):
-        if cls.busy:
-            raise OSError
-        cls.busy = True
-        with open(get_filename(filename), mode) as file:
-            data = file.read()
-        cls.busy = False
-        return data
-
-    @classmethod
-    def save(cls, filename, data, mode):
-        if cls.busy:
-            raise OSError
-        cls.busy = True
-        with open(get_filename(filename), mode) as file:
-            file.write(data)
-        cls.busy = False
-
-CONFIG = configparser.ConfigParser()
-with open(get_filename('config.ini')) as file:
-    CONFIG.read_file(file)
-for setting in URLS:
-    assert CONFIG['urls'][setting]
-for setting in FILES :
-    assert CONFIG['filenames'][setting]
-for setting in ITEM_SETTINGS:
-    assert CONFIG['item_settings'][setting]
-
-class ItemProperty:
-
-    def __init__(self, *, default=None, read_only=True, dumpable=True):
-        self.read_only = read_only
-        self.default   = default
-        self.dumpable  = dumpable
-
-    def __set_name__(self, cls, name):
-        self.name = name
-        cls._set_properties = ()
-        if name in cls.__annotations__ and callable(cls.__annotations__[name]):
-            self.setter = cls.__annotations__[name]
-        else:
-            self.setter = None
-
-    def __get__(self, instance, cls):
-        return self if instance is None else instance.__dict__[self.name]
-
-    def __set__(self, instance, value):
-        if self.name not in instance._set_properties or not self.read_only:
-            if self.setter is not None:
-                value = self.setter(value)
-            instance.__dict__[self.name] = value
-        else:
-            raise ItemPropertyIsReadOnlyError(attr=self.name)
-        if self.name not in instance._set_properties:
-            instance._set_properties = (*instance._set_properties, self.name)
-
-class ItemMeta(type):
-    def __new__(metacls, cls, bases, dict):
-        self = super().__new__(metacls, cls, bases, dict)
-        props = [v for k,v in dict.items() if isinstance(v, ItemProperty)]
-        self._all_properties        = [p.name for p in props]
-        self._mutable_properties    = [p.name for p in props if not p.read_only]
-        self._immutable_properties  = [p.name for p in props if p.read_only]
-        self._dumpable_properties   = [p.name for p in props if p.dumpable]
-        return self
-
-class Item(metaclass=ItemMeta):
-    """An Oldschool runescape item
-
-"""
-    id: int                = ItemProperty(dumpable=False)
-    name: str              = ItemProperty()
-    alch: int              = ItemProperty()
-    membs: bool            = ItemProperty()
-    desc: str              = ItemProperty()
-    osb_price: int         = ItemProperty(default=0, read_only=False)
-    ge_price: int          = ItemProperty(default=0, read_only=False)
-    last_osb_update        = ItemProperty(default=None, read_only=False)
-    last_ge_update         = ItemProperty(default=None, read_only=False)
-    ge_cache_priority: int = ItemProperty(default=0, read_only=False)
-
-    def __init__(self, id, name, alch, membs, desc, **kws):
-        for prop in self._all_properties:
-            self.__dict__[prop] = type(self).__dict__[prop].default
-        self.id    = id
-        self.name  = name
-        self.alch  = alch
-        self.membs = membs
-        self.desc  = desc
-        for k in kws:
-            setattr(self, k, kws[k])
-
-    def _dump(self):
-        """Convert Item instance into a dictionary ready for pickling"""
-
-        return {k:getattr(self,k) for k in self._dumpable_properties}
+    def get_osb_info(self):
+        return osb_lookup(self.id)[self.id]
+    
+    def get_best_price(self):
+        r = osb_lookup(self.id)[self.id]
+        if r:
+            if r.price:
+                return r
+        return ge_lookup(self.id)[self.id]
 
     @property
     def karamja(self):
-        return self.alch * 14 // 12
+        return self.alch * 14 // 2
 
     @property
     def low_alch(self):
@@ -153,36 +59,7 @@ class Item(metaclass=ItemMeta):
 
     @property
     def store_price(self):
-        return self.alch * 5 // 3
-
-    def get_best_price(self,
-                       osb_expiration=None,
-                       ge_expiration=None):
-        """Return the OSB price if it is cached, else the GE price
-
-        If expirations are given, it will ignore price data if it is older
-        than the expiration value in seconds."""
-        if self.osb_price:
-            delta = _delta(self.last_osb_update)
-            if osb_expiration is None or delta < osb_expiration:
-                return self.osb_price
-        elif self.ge_price:
-            delta = _delta(self.last_ge_update)
-            if ge_expiration is None or delta < ge_expiration:
-                return self.ge_price
-        else:
-            return None
-
-    @property
-    def price_discrepancy(self):
-        if self.osb_price and self.ge_price:
-            a, b = self.osb_price, self.ge_price
-            a, b = max(a, b), min(a, b)
-            return (a-b)/b
-
-    def get_ge_price(self):
-        self.ge_price, self.last_ge_update = (*ge_lookup(self.id).items(),)[0]
-        return self.ge_price
+        return self.alch * 5//3    
 
     def __str__(self):
         return self.name
@@ -190,381 +67,585 @@ class Item(metaclass=ItemMeta):
     def __int__(self):
         return self.id
 
-    def __hash__(self):
-        return hash((self.__class__, self.id, self.name))
+isiteminstance=Item.__instancecheck__
+@safe_repr
+class ItemSet(frozenset):
+    """Indexable frozenset subclass for holding sets of `Item` instances
 
-    def __eq__(self, other):
-        return self.__hash__() == getattr(other, '__hash__', None)
+    Can be cast to a dict with ItemSet.as_dict(key="id")
 
-    def __repr__(self):
-        args = ', '.join(f'{p}={getattr(self,p)!r}'
-                         for p in self._immutable_properties)
-        return f'{type(self).__name__}({args})'
+    Can be easily sorted by item attribute with ItemSet.sort_by or by
+    using the prebuilt sort_by functions.
+    
+    As a frozenset subclass, the standard binary set operators
+    (and their respective methods) work:
+        & (intersection)
+        | (union)
+        - (difference)
+        ^ (symmetric difference)
+    
+    The __contains__ will return True if any element in search(x) is
+    in the set. For example:
+       -> 6691 in search('sara brew')
+          True
+       -> "sgs" in search('godsword')
+          True
+    """
+    __slots__ = ('__link',)
 
-    def __setattr__(self, attr, value):
-        # only allow sunder/dunder attributes or ItemProperties to be set
-        if attr.startswith('_') or attr in self._all_properties:
-            super().__setattr__(attr, value)
-        else:
-            raise exceptions.ItemPropertyIsReadOnlyError(attr=attr)
-
-    def restore_defaults(self, prop, *properties, all_props=False):
-        """Restore an item's default values"""
-        
-        if all_props:
-            properties = self._all_properties
-        else:
-            properties = (prop, *properties)
-        assert all(prop in self._mutable_properties for prop in properties)
-        for prop in properties:
-            setattr(self, prop, getattr(type(self), prop).default)
-
-class ItemsMeta(type):
-    def __new__(metacls, cls, bases, namespace):
-        if bases:
-            raise TypeError('cannot subclass Items')
-        self = super().__new__(metacls, cls, bases, namespace)
-        self.reload()
+    def __new__(cls, *args, ichecker=itertools.repeat((int, str, Item))):
+        items = []
+        validtypes = map(isinstance, args, ichecker)
+        for arg, check in zip(args, validtypes):
+            if check:
+                if isiteminstance(arg):
+                    arg = arg
+                else:
+                    arg = (get if isintinstance(arg) else get_by_name)(arg)
+            if not arg or not check:
+                name = arg.__class__.__name__
+                sname = cls.__name__
+                error = TypeError(f'{sname}(*args) args must be int, str, '
+                                  'or Item instances, not {name!r}')
+                raise error
+            items += [arg]
+        self = frozenset.__new__(cls, items)
+        self.__link = (*items,)
         return self
+    
+    @classmethod
+    def _from_itemset(cls, args):
+        self = frozenset.__new__(cls, args)
+        self.__link = (*args,)
+        return self
+    
+    def as_dict(self, key='id', dict=DotDict):
+        """Map `self` to a mapping using `key` (any valid Item attr) as
+        the dict's key"""
+        keys = self.__link
+        return dict(zip(map(operator.attrgetter(key), keys), keys))
 
-    def load_item_data(self):
-        """Load item data from disk"""
-        try:
-            assert 1==2
-            data = _ItemDataIO.load(CONFIG['filenames']['item_data'], 'rb')
-            data = zlib.decompress(data)
-            data = pickle.loads(data)
-        except:
-            warn = Warning(f"couldn't load {CONFIG['filenames']['item_data']}")
-            warnings.warn(warn)                
-            data = _ItemDataIO.load(CONFIG['filenames']['backup'], 'r')
-            data = json.loads(data)
-            data = {int(k):data[k] for k in data}        
-        self._hash_map = {}
-        self._data = {}
-        for item in (Item(k, **data[k]) for k in data):
-            hashval = hash(item)
-            self._hash_map[hash(item.id)] = hashval
-            self._hash_map[hash(item.name)] = hashval
-            self._data[hashval] = item
+    def ge_info(self):
+        """Map `self` to a dict of Item: ge_price pairs."""
+        keys = self.__link
+        vals = ge_lookup(*keys)
+        return DotDict(zip(keys, [vals[i] for i in map(int, keys)]))
+    
+    def osb_info(self):
+        """Map `self` to a dict of Item: osb_price pairs."""
+        keys = self.__link
+        vals = osb_lookup(*self)
+        return DotDict(zip(keys, [vals[i] for i in map(int, keys)]))
 
-    def dump_item_data(self, data=None):
-        """Save the current state to disk"""
+    def _get_info(self, key):
+        keys = self.__link
+        vals = map(operator.attrgetter(key), keys)
+        return DotDict(zip(keys, vals))
 
-        if data is None:
-            data = {i.id:i._dump() for i in self}
-        data = pickle.dumps(data)
-        data = zlib.compress(data)
-        _ItemDataIO.save(CONFIG['filenames']['item_data'], data, 'wb')
+    def alch_info(self):
+        """Map `self` to a dict of Item: alch pairs."""
+        return self._get_info('alch')
 
-    def load_search_func(self):
-        """Reload the item search function
+    def low_alch_info(self):
+        """Map `self` to a dict of Item: alch pairs."""
+        return self._get_info('low_alch')
 
-       Must be reloaded each time a new item is added"""
-        
-        abbv_data  = _ItemDataIO.load(CONFIG['filenames']['abbreviations'], 'r')
-        slang_data = _ItemDataIO.load(CONFIG['filenames']['slang'], 'r')
-        meta_data  = _ItemDataIO.load(CONFIG['filenames']['metaitems'], 'r')
-        return search_engine.setup(
-            map(str, self),
-            json.loads(abbv_data),
-            json.loads(meta_data),
-            json.loads(slang_data))
+    def karamaja_info(self):
+        """Map `self` to a dict of Item: karamja price pairs."""
+        return self._get_info('karamja')
 
-    def restore_defaults(self, *properties, all_props=False):
-        """Reset default item properties for all Items"""
+    def store_price_info(self):
+        """Map `self` to a dict of Item: store_price pairs."""
+        return self._get_info('store_price')
 
-        if all_props:
-            properties = Item._all_properties
-        assert all(prop in Item._mutable_properties for prop in properties)
-        for item in self:
-            item.restore_defaults(*properties)
+    def membs_info(self):
+        """Map `self` to a dict of Item: membs pairs."""
+        return self._get_info('membs')
 
-    def _cache_loop(self, loop):
-        for iteration in loop:
-            time.sleep(iteration)
-
-    def _clear_ge_cache(self, ignore_age_settings=False):
-        """Clear the ge cache. Does not clear the lru_cache of _ge_lookup.
-
-        If `ignore_age_settings` is True, will remove all ge price info
-        regardless of age"""
-
-        if not ignore_age_settings:
-            for item in filter(lambda i: i.ge_price, self):
-                if _delta(item.last_ge_update) > int(
-                    CONFIG['item_settings']['max_ge_price_age']):
-                    item.restore_defaults('ge_price', 'last_ge_update')
+    def desc_info(self):
+        """Map `self` to a dict of Item: desc pairs."""
+        return self._get_info('desc')
+    
+    def sorted_by(self, attribute, *, reverse=False):
+        """Sort `self` according to each Item in `self`'s attributes"""
+        link = self.__link
+        if attribute == 'ge_price':
+            prices = ge_lookup(*link)
+            prices = {i:prices[i.id].price for i in link}
+            keyfunc = prices.get
+        elif attribute == 'osb_price':
+            prices = osb_lookup(*link)
+            prices = {i:prices[i.id].price for i in link}
+            keyfunc = prices.get
         else:
-            self.restore_defaults('ge_price', 'last_ge_update')
-        self.ge_cache = set(i.id for i in self if i.ge_price)
+            keyfunc = operator.attrgetter(attribute)
+        return sorted(link, key=keyfunc, reverse=reverse)
 
-    def _clear_osb_cache(self, ignore_age_settings=False):
-        """Clear the osb cache. 
+    def index(self, elem):
+        return self.__link.index(elem)
 
-        If `ignore_age_settings` is True, will remove all osb price info
-        regardless of age"""
-
-        if not ignore_age_settings:
-            for item in filter(lambda i: i.osb_price, self):
-                if _delta(item.last_osb_update) > int(
-                    CONFIG['item_settings']['max_osb_price_age']):
-                    item.restore_defaults('osb_price', 'last_osb_update')
-        else:
-            self.restore_defaults('osb_price', 'last_osb_update')
-        self.osb_cache = set(i.id for i in self if i.osb_price)
-
-    def _ge_loop(self):
-        """Grand Exchange price caching loop.
-
-    """
-        self._last_ge_cache_update = 0
-        self._last_ge_update = ge_lookup(1965)[1965]['time']
-        self._clear_ge_cache()
-        def get_next_batch():
-            order = sorted(self, key=lambda x: x.ge_cache_priority,reverse=True)
-            primary   = [i.id for i in order if
-                         not i.osb_price and not i.ge_price]
-            secondary = [i.id for i in order if not i.ge_price]
-            return (primary + secondary)[:self._ge_cache_batch_size]
-
-        while True:
-            batch = get_next_batch()
-            if batch:
-                prices = ge_lookup(*batch)
-                for itemid, data in prices.items():
-                    if data['time'] != self._last_ge_update:
-                        self._last_ge_update = data['time']
-                        self._clear_ge_cache()
-                        _ge_lookup.last_clear = time.time()
-                        _ge_lookup.cache_clear()
-                        break
-                    self[itemid].ge_price = data['price']
-                    self[itemid].last_ge_update = data['time']
-                    self.ge_cache.add(itemid)
-                self._last_ge_cache_update = time.time()
-            for i in range(max(1, len(batch))):
-                yield self._ge_update_delay
-
-    def _osb_loop(self):
-        """Osb price caching loop
-
-    """
-        self._clear_osb_cache()
-        self._last_osb_cache_update = 0
-        while True:
-            if _delta(self._last_osb_cache_update) > self._osb_update_delay:
-                prices = osb_lookup()
-                new_items = [i for i in prices if i not in self]
-                if new_items:
-                    items = self.download_new_items(new_items)
-                    self.dump_item_data(items)
-                    self.reload()
-                self._last_osb_cache_update = int(time.time())
-                for itemid, price in prices.items():
-                    if price:
-                        self[itemid].osb_price = price
-                        self[itemid].last_osb_update = (
-                            self._last_osb_cache_update)
-                        self.osb_cache.add(itemid)
-                    else:
-                        self[itemid].ge_cache_priority += 1
-                        if self[itemid].last_osb_update:
-                            delta = (self._last_osb_cache_update -
-                                     self[itemid].last_osb_update)
-                            if delta > self._osb_price_expiration:
-                                self[itemid].restore_default('osb_price',
-                                                             'last_osb_update')
-            yield self._osb_update_delay
-
-    def download_new_items(self, items):
-        if not items or not all(isinstance(i, int) for i in items):
-            raise ValueError('items must be a list of itemids')
-        if len(items) > 30:
-            raise ValueError('cannot download more than 30 new items at once')
-        dumped = {i.id:i._dump() for i in self}
-        dupes = [i for i in items if i in dumped]
-        if dupes:
-            raise ValueError(f'items {", ".join(dupes)} already exist')
-        data = osb_lookup('sp', 'members', 'name')
-        data = {k:{'name':data[k]['name'],
-                   'alch':data[k]['sp'] * 3//5,
-                   'membs':data[k]['members']} for k in items}
-        def description_getter(itemid):
-            nonlocal data
-            response = _request(CONFIG['urls']['ge_catalogue']%itemid).json()
-            data[itemid] = {**data[itemid],
-                            **{'desc':response['item']['description']}}
-        with concurrent.futures.ThreadPoolExecutor(len(items)) as executor:
-            futures = {executor.submit(description_getter, i):i for i in items}
-            concurrent.futures.wait(futures)
-        return {**dumped, **data}
-
-
-    def _delete(self, item):
-        if not isinstance(item, Item):
-            raise TypeError('item must be Item instance')
-        del self._hash_map[hash(item.id)]
-        del self._hash_map[hash(item.name)]
-        del self._data[hash(item)]
-
-    def __contains__(self, key):
-        return hash(key) in self._hash_map
-
-    def __iter__(self):
-        return iter(self._data.values())
-
-    def __len__(self):
-        return len(self._data)
-
-    def __getitem__(self, key):
-        try:
-            return self._data[self._hash_map[hash(key)]]
-        except:
-            raise KeyError(key) from None
-
-class Items(metaclass=ItemsMeta):
-
-    @classmethod
-    def reload(cls):
-        cls.load_item_data()
-        cls._search = cls.load_search_func()
-
-    @classmethod
-    def save(cls):
-        cls.dump_item_data()
-
-    @classmethod
-    def search(cls, query):
-        r = cls._search(query)
+    def __contains__(self, elem, truth=operator.truth):
+        r = search(elem)
         if r:
-            return [cls[i.lower().capitalize()] for i in r]
+            return truth(super().__and__(r))
+        return False
+    
+    def __iter__(self):
+        return iter(self.__link)
+    
+    def __getitem__(self, index):
+        return self.__link[index]
+    
+    def __or__(self, other):
+        return self._from_itemset(super().__or__(other))
 
-    @classmethod
-    def start_ge_cache(cls, batch_size=5, update_delay=7.5):
-        if hasattr(cls, '_ge_thread') and cls._ge_thread.is_alive():
-            raise ValueError('ge thread is already running')
-        cls._ge_cache_batch_size=batch_size
-        cls._ge_update_delay = update_delay
-        cls._ge_thread = threading.Thread(
-            target=cls._cache_loop, args=(cls._ge_loop(),))
-        cls._ge_thread.start()
+    def __xor__(self, other):
+        return self._from_itemset(super().__xor__(other))
 
-    @classmethod
-    def start_osb_cache(cls, update_delay=2000, expiration=86400):
-        if hasattr(cls, '_osb_thread') and cls._osb_thread.is_alive():
-            raise ValueError('osb thread is already running')
-        cls._osb_update_delay = update_delay
-        cls._osb_price_expiration = expiration
-        cls._osb_thread = threading.Thread(
-            target=cls._cache_loop, args=(cls._osb_loop(),))
-        cls._osb_thread.start()
+    def __sub__(self, other):
+        return self._from_itemset(super().__sub__(other))
 
-_ge_request_attempts = 0
-_ge_request_successes= 0
-def ge_req_success():
-    return _ge_request_attempts / max(1, _ge_request_successes)
+    def __and__(self, other):
+        return self._from_itemset(super().__and__(other))
 
-def _request(url, timeout=2, max_tries=3):
-    """Wrapper for request.get to handle occasional repeated timeouts"""
-    counter = 0
-    while counter < max_tries:
+    __ror__ = union = __or__
+    __rxor__ = symmetric_difference = __xor__
+    __rsub__ = difference = __sub__
+    __rand__ = intersection = __and__    
+
+class _PriceInfo:
+    def __init_subclass__(cls, *args, **kwargs):
+        cls.__doc__ = f'{cls.__name__}({", ".join(cls._fields)})'
+
+    @property
+    def delta(self):
+        return time_in_seconds() - self.time
+    
+class ge_info(_PriceInfo, namedtuple('info',('id', 'price', 'time'))):
+
+    pass
+
+class osb_info(_PriceInfo, namedtuple('info',('id', 'price', 'time'))):
+    
+    def as_dict(self):
+        return {'price':self.price, 'time':self.time}
+
+class _Interface:
+    
+    __instances = {}
+
+    def __init_subclass__(cls, *, cache, info_class=None,
+                          cache_file_key=None, price_lookup_url_key=None):
+        name = __class__.__name__
+        error = None
+        if info_class is None:
+            error = TypeError(f'{name} subclass requires `info_class` argument.')
+        elif not isdictinstance(cache):
+            error = TypeError(f'{name} subclass `cache` should be a dict instance.')
+        elif cache_file_key not in CONFIG.filenames:
+            error = ValueError(f'{name} subclass: bad FILENAME key in `cache_file`.')
+        elif price_lookup_url_key not in CONFIG.item_data_urls:
+            error = ValueError(f'{name} subclass: bad URL key in `price_lookup_url`.')        
+        if error:
+            raise error
+        cls._cache_file_key = cache_file_key
+        cls._price_url_key = price_lookup_url_key
+        cls._info_class = info_class
+        cls.cache = cache
+
+    def __new__(cls, *args, **kwargs):
+        if __class__.__instances.get(cls) is None:
+            instance = __class__.__instances[cls] = object.__new__(cls)
+            instance.cache.clear()
+            instance.last_check = 0
+            instance.last_update = 0
+            instance._thread = None
+            instance._exceptions = {}
+            instance.requests = {}
+            return instance
+        return __class__.__instances[cls]
+    
+    def auto_cache(self):
+        if self._is_autocaching:
+            return True
+        self._thread = threading.Thread(target=self._auto_cache)
+        self._thread.start()
+
+    def _get_most_recent_requests(self, t):
+        t = time_in_seconds() - t
+        return {k:v for k, v in self.requests.items() if k >= t}
+
+    @property
+    def _is_autocaching(self):
+        return False if not self._thread else self._thread.is_alive()
+    
+    @property
+    def cache_file(self):
+        return PATH/CONFIG.filenames[self._cache_file_key]
+
+    @property
+    def price_url(self):
+        return CONFIG.item_data_urls[self._price_url_key]
+
+    def lookup_from_cache(self, *ids):
+        ids = [*map(int, {*ids})]
+        return {i:v for i, v in zip(ids, map(self.cache.get, ids))}
+    
+    def lookup(self, *ids):
+        results = {}
+        cached_results = {}
+        ids = {*map(int, ids)}
+        check = time_in_seconds()
+        if check - self.last_check < 300:
+            cached_results = self.lookup_from_cache(*ids)
+            cached_results = {k:v for k, v in cached_results.items()
+                              if v is not None}
+        ids -= cached_results.keys()
+        if not ids:
+            return cached_results
+        if len(ids) > 100:
+            error = Exception('cannot look up more than 100 items at a time.')
+            raise error
+        exceptions = {}
+        info = self._info_class
+        with ThreadPoolExecutor(len(ids)) as executrix:
+            futures = map(executrix.submit, itertools.repeat(self._lookup), ids)
+            for future in as_completed(futures):
+                id, result = future.result()
+                if isexceptioninstance(result):
+                    exceptions[id] = result
+                else:
+                    results[id] = info(**result)
+        for i, v in results.items():
+            if v.time > self.last_update:
+                self.cache.clear()
+                self.last_update = v.time
+                cached_results = self.lookup(*cached_results)
+                break
+        for i, v in results.items():
+            self.cache[i] = v
+        self.last_check = check        
+        return DotDict(**cached_results, **results, **exceptions)
+
+class OSBInterface(_Interface,
+                   cache=DotDict(),
+                   info_class=osb_info,
+                   cache_file_key='osb_cache',
+                   price_lookup_url_key='osb_price_api'):
+
+    @property
+    def price_catalogue_url(self):
+        return CONFIG.item_data_urls.osb_catalogue
+    
+    def lookup(self, *ids):
+        ids = {*map(int, ids)}
+        info = self._info_class
+        cache = self.cache
+        cache_get = cache.get
+        check = time_in_seconds()
+        results = {}
+        oldest = check - CONFIG.cache_settings.osb_cache_duration
+        if check - self.last_check < 300:
+            cached_result = {}
+            for id in ids:
+                cached = cache_get(id)
+                if cached:
+                    if cached.time >= oldest:
+                        cached_result[id] = cached
+                        continue
+                    else:
+                        break
+                cached_result[id] = info(id=id, price=0, time=self.last_check)
+            else:
+                return cached_result        
+        response = requests.get(self.price_catalogue_url)
+        data = {k:v for k, v in response.json().items() if k not in OSB_IGNORE}        
+        for k, v in data.items():
+            id = int(k)
+            price = v['overall_average']
+            result = info(id=id, price=price, time=check)
+            if price:
+                cache[id] = result
+            else:
+                cached = cache_get(id)
+                if cached:
+                    result = cached
+            if id in ids:
+                results[id] = result
+        self.last_check = check
+        return results
+    
+    def _lookup_individual(self, id):
+        
+        check = time_in_seconds()
         try:
-            data = requests.get(url, timeout=timeout)
-            return data
+            if not get(id):
+                raise NonExistentItemError('id', id)
+            self.requests.setdefault(check, 0)
+            self.requests[check] += 1
+            cached_result = self.cache.get(id)
+            if cached_result is not None:
+                if cached_result.delta < CACHE_SETTINGS.osb_cache_duration:
+                    return cached_result
+            for i in range(5):
+                response = requests.get(self.price_url%id, timeout=.5)
+                if response.ok:
+                    text = response.text
+                    if text:
+                        j = DotDict(response.json())
+                        break
+                time.sleep(.05)
+            else:
+                j = DotDict(response.json())    
+            price = j.overall or j.selling or j.buying
+            if price:
+                result = dict(
+                    id=id,
+                    price=price,
+                    time=check,
+                    sell_volume=j['sellingQuantity'],
+                    buy_volume=j['buyingQuantity'])
+            elif cached_result:
+                result = cached_result
+            else:
+                result = dict(id=id,price=0,time=check,sell_volume=0,
+                                          buy_volume=0)
+            return id, result
+        except Exception as error:
+            return id, error
+
+    def dump_cache(self, path_override=None, backup_path=None):
+        if path_override:
+            path = pathlib.Path(path_override)
+        else:
+            path = self.cache_file
+        if backup_path:
+            backup_file(path, pathlib.Path(backup_path))
+        c = {k:v.as_dict() for k, v in self.cache.items()}
+        with open(path, 'w') as fp:
+            json.dump(c, fp, indent=1)
+
+    def load_cache(self, path_override=None):
+        if path_override:
+            path = pathlib.Path(path_override)
+        else:
+            path = self.cache_file
+        with open(path) as fp:
+            c = json.load(fp)
+        self.cache.update({k:self._info_class(id=k, **v) for k, v in c.items()})
+
+    def _auto_cache(self):
+        while True:
+            self.lookup()
+            time.sleep(CONFIG.cache_settings.osb_auto_cache_frequency)
+            
+class GeInterface(_Interface,
+                  cache=DotDict(),
+                  info_class=ge_info,
+                  cache_file_key='ge_cache',
+                  price_lookup_url_key='ge_price_api'):       
+
+        
+    def dump_cache(self, path_override=None, backup_path=None):
+        if path_override:
+            path = pathlib.Path(path_override)
+        else:
+            path = self.cache_file
+        if backup_path:
+            backup_file(path, pathlib.Path(backup_path))
+        c = {k:v.price for k, v in self.cache.items()}
+        with open(path, 'w') as fp:
+            fp.write(f'{self.last_update}\n{json.dumps(c, indent=1)}')
+
+    def load_cache(self, path_override=None):
+        if path_override:
+            path = pathlib.Path(path_override)
+        else:
+            path = self.cache_file
+        with open(path) as fp:
+            last_update, b, c = fp.read().partition('\n')
+        last_update = int(last_update)
+        if last_update < self.last_update:
+            error = Exception('cache file is out of date')
+            warnings.warn(error)
+        self.last_update = last_update
+        c = {int(i):v for i, v in json.loads(c).items()}
+        info = self._info_class
+        self.cache.update({i:info(**{'id':i, 'price':v, 'time':last_update})
+                           for i, v in c.items()})
+        
+    def _lookup(self, id):
+        check = time_in_seconds()
+        if id in self.cache and check - self.last_check < 300:
+            return self.cache[id]
+        try:
+            self.requests.setdefault(check, 0)
+            self.requests[check] += 1
+            response = requests.get(self.price_url%id, timeout=2)
+            results = response.json()['daily']
+            key = max(results)
+        except Exception as error:
+            return id, error
+        self.last_check = check
+        return id, {'id':id, 'price':results[key], 'time':int(key)//1000}
+
+    def _auto_cache(self):
+        sorter = operator.attrgetter('ge_cache_priority')
+        freq = 86400 / CONFIG.cache_settings.ge_auto_cache_frequency
+        if freq < 6.5:
+            error = ValueError("ge_auto_cache_frequency cannot be greater "
+                               "than 13_000 items per day "
+                               "(aka > ~90 lookups per 10 minutes) "
+                               "without triggering Jagex's ddos protection.")
+            raise error
+        while True:
+            update_reqs = self._get_most_recent_requests
+            cache = self.cache
+            self.requests = update_reqs(600)
+            past_10 = sum(self.requests.values())
+            n = min(20, max(0, 50-past_10))
+            if n:
+                pool = sorted(list_items(), key=sorter, reverse=True)
+                pool = (i for i in sorted(list_items(), key=sorter, reverse=1)
+                        if i.id not in cache)
+                result = self.lookup(*itertools.islice(pool, n))
+                errors = {k:v for k, v in result.items()
+                          if isinstance(v, Exception)}
+                if errors:
+                    self._exceptions[time_in_seconds()] = errors
+            sleep_time = freq * (n + max(past_10-20, 0))
+            time.sleep(sleep_time)            
+
+def load(__items=DotDict()):
+    global get, _search, _items, _by_name
+    __items.clear()
+    _items = MappingProxyType(__items)
+    get = _items.get
+    with open(PATH/CONFIG.filenames.item_data) as fp:
+        for line in json.load(fp):
+            __items[line['id']] = Item(**line)
+    _search = search_setup(map(name_getter, _items.values()),
+                           *get_search_setup(),
+                           result_cls=ItemSet)
+    _by_name = DotDict({i.name.lower(): i for i in _items.values()})
+    
+def get_search_setup():
+    'abbv, ngrams, slang'
+    with open(PATH/CONFIG.filenames.abbreviations) as fp:
+        abbv = json.load(fp)
+    with open(PATH/CONFIG.filenames.ngrams) as fp:
+        ngrams = json.load(fp)
+    with open(PATH/CONFIG.filenames.slang) as fp:
+        slang = json.load(fp)
+    return abbv, ngrams, slang
+
+
+def view_items():
+    return ItemSet._from_itemset(_items.values())
+
+def list_items():
+    return List(_items.values())
+
+def iter_items():
+    return iter( _items.values())
+
+def save_itemdb(path_override=None, backup=None):
+    '''Save current state of item database to disk.
+
+    If `path_override` is provided, the database is dumped there
+    instead of the usual file located in CONFIG.filenames.item_data.
+
+    If `backup` is provided, a copy of the previous database is
+    moved there (assuming it exists).
+    '''
+    if path_override:
+        path = pathlib.Path(path_override)
+    else:
+        path = PATH/CONFIG.filenames.item_data
+    items = map(operator.methodcaller('_dump'), iter_items())
+    text = json.dumps([*items], indent=2)
+    json.loads(text)
+    if backup:
+        backup_file(path, pathlib.Path(backup))
+        backup = pathlib.Path(backup)
+    with open(path, 'w') as fp:
+        fp.write(text)
+
+def update_itemdb():
+    '''Check for new items added to the game and add them to the DB'''
+    response = requests.get(CONFIG.item_data_urls['osb_catalogue'])
+    data = response.json()
+    data = {int(k):v for k, v in data.items() if k not in OSB_IGNORE}
+    missing = [i for i in data if not get(i)]
+    new = {k:{'id':k,
+              'name':v['name'],
+              'alch':v['sp']*2//3,
+              'membs':v['members']} for k, v in data.items()
+           if k in missing}
+    
+    def desc_getter(id):
+        try:
+            response = requests.get(CONFIG.item_data_urls['ge_catalogue']%id)
+            j = response.json()
+            desc = j['item']['description']
+            return id, desc
         except:
-            counter += 1
-            time.sleep(1)
-    raise requests.ConnectionError(url)
+            return None, None
+    while missing:
+        chunk = missing[:30]
+        with ThreadPoolExecutor(len(chunk)) as executor:
+            futures = map(executor.submit, itertools.repeat(desc_getter), chunk)
+            for future in as_completed(futures):
+                itemid, desc = future.result()
+                if isinstance(desc, str):
+                    new[itemid]['desc'] = desc
+                    missing.remove(itemid)
+    for k, v in new.items():
+        if k in _items:
+            raise ValueError('there already is an item with id {id}')
+        _items[k] = Item(**v)
+        
+def get_by_name(name, default=None):
+    return _by_name.get(' '.join(name.lower().split()), default)
 
-@functools.lru_cache(maxsize=len(Items))
-def _ge_lookup(i, key=None):
-    """All ge price lookups go through here in order to use the lru_cache.
+def search(*params):
+    '''Search the item database
 
-     The cache should be cleared once a day, (and it is cleared automagically
-     while the caching thread is alive)
-  """
+    Parameters can be integers representing item id number or strings.
+    Acceptable strings include direct matches, common abbreviations
+    such as "ags" for Armadyl godsword, even common misspellings
+    are correctly resolved. "blk ele" for example will find
+    "Black elegant shirt" and "Black elegant legs" and "rune ore"
+    will match "Runite ore".
+    '''
+    result = ItemSet()
+    from_ids = []
+    for param in params:
+        if isintinstance(param):
+            item = get(param)
+            if item is None:
+                error = ValueError(f'{param} is not a valid item id.')
+                raise error
+            from_ids += [item]
+        elif isstrinstance(param):
+            if not param:
+                raise ValueError('cannot search for empty string')
+            items = _search(param)
+            if items:
+                result |= items
+        else:
+            error = TypeError('search parameters must be ints or strs.')
+            raise error
+    return result | ItemSet(*from_ids)
 
-    global _ge_request_attempts, _ge_request_successes
-    _ge_request_attempts += 1
-    response = _request(CONFIG['urls']['ge_price_api']%i)
-    results  = response.json()['daily']
-    results  = {int(k)//1000:v for k,v in results.items()}
-    key      = max(results.keys()) if key is None else key
-    _ge_request_successes += 1
-    return {i: {'price':results[key], 'time':key}}
-_ge_lookup.last_clear = time.time()
-
-def ge_lookup(*items, key=None):
-    """Lookup some items on the Grand Exchange api
-
-     The GE api begins to throttle requests once your average reaches > 100 per
-     10 minutes. A burst of 100 will go through instantly, but any more than that
-     will be severely throttled until requests per 10 mins drops below 6.
-"""
-    results = {}
-    if len(items) == 1 and isinstance(items[0], (list, tuple)):
-        items = items[0]
-    items = [int(item) for item in items]
-    if not items:
-        raise ValueError('no items supplied')
-    with concurrent.futures.ThreadPoolExecutor(len(items)) as executor:
-        futures = {executor.submit(_ge_lookup, i, **{'key':key}): i for i in items}
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                results = {**results, **future.result()}
-            except:
-                print(f'failed to get ge price data for items {items}')
-
-    return results
-
-def osb_lookup(*values):
-    """Download all data from the OsBuddy exchange
-
-    `values` are specific fields. If blank it only returns the price.
-    Valid `values` are:
-     * `id`
-     * `name`
-     * `sp` - item's general store price which is 5//3 * its high alch
-     * `overall_average - overall buying/selling price. this is what's used
-                          automatically
-     * `sell_average`
-     * `members` - item is member's only
-     """
-    keys = ('overall_average',) if not values else values
-    data = _request(CONFIG['urls']['osb_price_api'])
-    data = data.json()
-    data = {int(i):data[i] for i in data if int(i) not in OSB_IGNORE}
-    if len(keys)==1:
-        data = {i:data[i][keys[0]] for i in data}
-    else:
-        data = {i:{k:data[i][k] for k in keys} for i in data}
-    return data
-
-def get_price_discrepancies(min_pct=0):
-    """List the price GE/OSB price discrepancies.
-
-     `min_pct` is the threshold. Items with a discrepancy lower than that
-     will not be returned
-     """
-
-    diffs = {i.id: i.price_discrepancy for i in Items}
-    return {k:v for k, v in diffs.items() if v is not None and v > min_pct}
-
-def get_alchlosses(*items, force_osb=True):
-    if items:
-        if not all(isinstance(item, Item) for item in items):
-            raise TypeError('items must be a list of Item objects')
-    else:
-        items = iter(Items)
-    if force_osb:
-        items = (item for items in items if item.osb_price)
-    else:
-        items = (item for item in items if item.get_best_price())
-    fn = lambda item: item.osb_price if force_osb else item.get_best_price()
-    nature = Items['Nature rune']
-    nat_price = fn(nature)
-    r = {item.id: item.alch-fn(item)-nat_price for item in items}
-    return r
-
-
+load()
+cls=GeInterface
+ge = cls()
+osb=OSBInterface()
+ge_lookup = GeInterface().lookup
+osb_lookup = OSBInterface().lookup
+if CONFIG.general_settings.load_osb_cache_on_import:
+    osb.load_cache()
+if CONFIG.general_settings.load_ge_cache_on_import:
+    ge.load_cache()
+    

@@ -1,236 +1,174 @@
-
 import re
-from functools import lru_cache, wraps, update_wrapper
 
-__all__ = ['ResultSet', 'setup']
-
-def container_repr(*, max_length=5, fn=None, enclosing=None):
-    """Limits the number of items displayed in a container's __repr__
-
-    Useful for large containers whose normal __repr__ would produce a
-    30000 character string.
-
-    The container must implement __len__ and __iter__ methods.
-
-    Arguments:
-        `max_length`: max number of results to show in the container repr
-
-        `fn`: a function to apply to the container, ie for sorting
-
-        `enclosing`: 2 character string sequence for optional container
-        enclosements. "{}" would indicate that the container represents
-        a set, and "[]" and "()" would indicate a list and tuple, respectively.
-    """
-    def wrap(__repr__):
-        if isinstance(enclosing, str) and len(enclosing)==2:
-            left, rite = enclosing
-        elif enclosing is not None:
-            raise TypeError('enclosing must be a 2 character string')
-        else:
-            left, rite = '', ''
-        def inner(self):
-            data = [*fn(self)] if fn is not None else [*self]       
-            left = ', '.join(map(repr, data[:max_length-1]))
-            length = len(data)
-            if length > max_length:                
-                mid  = '{<< and %s more >>}...'%(len(data) - max_length)
-                rep = f'{left}, {mid}, {data[-1]!r}'
-            elif length == max_length:
-                rep = f'{left}, {data[-1]!r}'
-            else:
-                rep = left
-            return f'{type(self).__name__}({left}{rep}{rite})'
-        return inner
-    return wrap
-
-class ResultSet:
-
+from collections import Counter
+from functools import lru_cache, update_wrapper, wraps
+from operator import methodcaller, attrgetter, itemgetter
+from itertools import chain, starmap
+from publicize import public
+isstrinstance = str.__instancecheck__
+islistinstance = list.__instancecheck__
+class _extra:
+    def __init__(self, n):
+        self.n = n
+    def __repr__(self):
+        return f'... and {self.n} more results'
+    
+class ResultSet(list):
+    
     def __init__(self, *args):
-        self._data = args
-
-    def extend(self, it):
-        self._data = (*self._data, *it)
-
-    def append(self, item):
-        self._data = (*self._data, it,)
-
-    def __len__(self):
-        return len(self._data)
-
-    def __contains__(self, item):
-        return item in self._data
-
+        super().extend(args)
+        
     def __iter__(self):
-        return iter(self._data)
-
-    def __add__(self, other):
-        if isinstance(other, (tuple, list, set, frozenset)):
-            other = self._data + (*other,)
-        elif isinstance(other, type(self)):
-            other = self._data + other._data
-        else:
-            raise TypeError(f"can only concatenate {type(self).__name__} or tuple")
-        return type(self)(*other)
-
-    def __iadd__(self, other):
-        y = self.__add__(other)
-        self._data = y._data
-        return self
-
-    def __radd__(self, other):
-        return self.__add__(other)
+        return iter(super().__getitem__(slice(0, 5)))
+    
+    def __repr__(self):
+        length = len(self)
+        x = super().__getitem__(slice(0, 5))
+        if length > 5:
+            x += [_extra(length-5)]
+        return f'ResultSet({x!r})'
     
     def __getitem__(self, index):
-        return self._data[index]
+        if isinstance(index, int):
+            return super().__getitem__(index)    
+        return type(self)(*super().__getitem__(index))
+    @property
+    def all(self):
+        return super().__getitem__(slice(None))
 
-    def __hash__(self):
-        return hash((type(self), self._data))
-
-    def __eq__(self, other):
-        return hash(self) == hash(other)
-
-    @container_repr(max_length=5)
-    def __repr__(self):
-        pass  
-
-def setup(words, abbreviations, meta, slang_, sep='~',
-                    must_contain_all=False, return_as_resultset=False):
+@public
+def search_setup(words,
+                 abbreviations,
+                 ngrams,
+                 slang_,
+                 sep='~',*,
+                 match_exact=False,
+                 cache=True,
+                 cache_size=2**14,
+                 result_cls=ResultSet):
     """Create a new search engine function
 
     The search engine works by splitting an argument up into individual
-    "words", or n-grams, which are them compared to the words used in the
-    setup.
-    
-    In order to register a hit, the entire argument must exist within
-    an item.
+    n-grams and comparing them to each item given to setup. In order to
+    register a hit, the entire argument must exist within an item.
 
     See the actual files for better examples...
     
     Arguments:
-        `words`: - a list of words to be searched through
+        `words`: The list of words searched
 
-        `abbreviations`: a dict {abbreviation: full} of
-        common abbreviations/acronyms for words. In the context
-        of runescape, "ags" is an abbreviation for Armadyl godsword
+        `abbreviations`: Mapping of abbreviations: word pairs
 
-        `meta`: a list of tuples in the pair of (regex, repl) that represent
-        words that exist within other words. In the context of Runescape,
-        an example would be Antidote+ and Antidote++. The string
-        "antidote+" exists in both items, but the searcher would most likely
-        mean to only get results for "antidote+".
+        `ngrams`: List of (regex, replacement) pairs
+        This is to be used when a a word is also a substring of other
+        words and it is obvious that this input means the substring.
+        'bat' is a substring of 'acrobat', but the user most likely
+        would want 'bat' and not all of the many words that contain
+        the sequence of letters 'bat'.
 
-        `slang`: a list of tuples in the pair of (regex, repl) that represent
-        common misspellings or slang words that don't actually exist in the
-        provided items. In the context of Runescape, a scimmy is a scimitar,
-        but no actual tems exist that contain the string 'scimmy' within their
-        name.
+        `slang`: A list of (regexp, repl) pairs
+        Obvious misspellings or abbreviations with multiple variants
+        that can fit into a regex pattern. If regex groups are present
+        then the same amount of variable replacement fields must exist.
+        For example:
+        "(?:black) mysti?c?(.*)", "mystic %s (dark)"
+        in that pattern if the search term was "black myst robe",
+        it would be converted to "mystic %s (dark)"%("robe",).
 
-        `sep`: the seperator of the items. It is used in the algorithm,
-        and it cannot exist in any of the items. "~" is the default because
-        it has the best performance. Invalid ascii characters like \x00
-        cause a huge performance drop.
+        `sep` is a character used internally by the search algorithm.
+        In the algorithm, all items are concatenated into a giant string
+        seperated by `sep`. As sep is used to delineate each seperate
+        item, it cannot exist within any of the items.
+        Note that on-ascii characters such as \x00 cause a significant
+        performance drop.
 
-        `must_contain_all`: If set, the entire search argument must exist within
-        a word. Wildcards obviously count as any letter.
-    
+        `cache` if True uses functools.lru_cache to speed up searches
+
+        `cache_size` is the size if cache (works best with power of 2)
+        
+        `result_cls` should be a container that takes multiple *args
     """
 
     items        = [i.lower() for i in words]
-    letter_freqs = {i[0]:0 for i in items}
-    for item in items:
-        letter = item[0]
-        letter_freqs[letter] += 1
+    letter_freqs = Counter(map(itemgetter(0), items))
+    # an optimization is to sort items by first letter frequency
+    #letter_freqs = {i[0]:0 for i in items}
+    #for item in items:
+    #    letter = item[0]
+    #    letter_freqs[letter] += 1
     order    = ''.join(sorted(letter_freqs,key=letter_freqs.get, reverse=True))
     by_close = *sorted(items, key=lambda item: order.index(item[0])),
-    tok      = '*' if must_contain_all else ''
-    by_close = *(f'{tok}{i}' for i in by_close),
     search_str = f'{sep}{sep.join(by_close)}{sep}'
     if (len(sep)>1) or  (sep in set(''.join(items))):
         raise ValueError(
             '"sep" {sep} cannot be used because it is within an item')
-    # remove spaces and punctuation
-    if must_contain_all:
-        re.sub(f'[^\w{sep}*]', '', search_str)
-    metaitems = ()
-    for prog, repl in meta:
-        if not isinstance(prog, str) and isinstance(repl, (list, str)):
-            raise ValueError
-        metaitems = (*metaitems, (re.compile(prog), repl))
-
-    slang = ()
-    for prog, repl in slang_:
-        slang = (*slang, (re.compile(prog), repl))
-    def search(query, wildcards=0):
+    def compile_first(pat, repl, comp=re.compile):
+        if not isinstance(pat, str) or not isinstance(repl, (str, list, tuple)):
+            raise TypeError(f'{pat} -> {repl!r}\n pattern must be a string '
+                            '(regex pattern) and repl must be a string '
+                            'or list/tuple of replacement fields.')
+        return comp(pat), repl
+    ngrams = *starmap(compile_first, ngrams),
+    slang = *starmap(compile_first, slang_),
+    get_index = search_str.index
+    get_rindex = search_str.rindex
+    word_counter = methodcaller('count')
+    def search(query):
         if query in abbreviations:
             return abbreviations[query]
-        x = query
-        x = x.lower()
+        x = query.lower()
         for prog, repl in slang:
             q = prog.search(x)
             if q:
                 x = prog.sub(repl, x)
                 if q.groups():
                     x %= q.groups()
-
-        for prog, repl in metaitems:
+        for prog, repl in ngrams:
             q = prog.search(x)
             if q:
-                if isinstance(repl, str):
-                    return repl%q.groups()
-                elif isinstance(repl, list):
+                if isstrinstance(repl):
+                    return repl % q.groups()
+                elif islistinstance(repl):
                     return repl
-
         y = x.replace(' ','')
-        if len(y) < 4:
+        if len(y) < 4 or match_exact:
             if y in by_close:
                 return y
-
-        words = [i for i in x.strip().split(' ')]
+        words = x.strip().split(' ')
         counts= {i:search_str.count(i) for i in words}
-        if not must_contain_all:
-            if 0 in counts.values():
-                return None
-            k, *words = sorted(words, key=counts.get)
-        else:
-            k, words = '*', sorted(words, key=counts.get)
+        if 0 in counts.values():
+            return None        
+        index_word, *words = sorted(words, key=counts.get)
         index = 0
-        rindex = search_str.rindex(k)
+        rindex = get_rindex(index_word)
         r = []
+        append = r.append
         while index < rindex:
-            index = search_str.index(k, index)
+            index = get_index(index_word, index)
             left  = search_str[:index].rindex(sep) + 1
-            rite  = index = search_str.index(sep, index)
+            rite  = index = get_index(sep, index)
             item  = rem = search_str[left:rite]
-            if must_contain_all:
-                for word in words:
-                    if word in item:
-                        rem = rem.replace(word, '', 1)
-                # if the number of letters remaining is less than or equal to
-                # the number of wildcards, it passes
-                ok = len(rem) < (1 + wildcards)
-                if ok:
-                    item = item.replace(k, '')
-            else:
-                ok = True
-                for word in words:
-                    if rem:
-                        ok = ok and word in rem
-                        if not ok:
-                            break
-                        rem = rem.replace(word, '', 1)
-                    else:
-                        break
+            ok    = True
+            for word in words:
+                if word not in rem:
+                    ok = not rem
+                    break
+                rem = rem.replace(word, '', 1)
             if ok:
-                r.append(item)
+                append(item)
         return r
-    if return_as_resultset:
-        def wrapper(*args, **kwargs):
-            r = search(*args, **kwargs)
-            if isinstance(r, str):
-                return ResultSet(r)
-            return ResultSet(*r) if r is not None else r
-        search_func = update_wrapper(lru_cache(16384)(wrapper), search)
+    
+    def wrapper(*args, **kwargs):
+        r = search(*args, **kwargs)
+        if isstrinstance(r):
+            return result_cls(r)
+        return result_cls(*r) if r is not None else r
+    if cache:
+        resulting_func = update_wrapper(lru_cache(16384)(wrapper), search)
     else:
-        search_func = update_wrapper(lru_cache(16384)(search), search)
-
-    return search_func
+        resulting_func = update_wrapper(wrapper, search)
+    resulting_func.by_close = by_close
+    resulting_func.ngrams = ngrams
+    resulting_func.abbreviations = abbreviations
+    resulting_func.slang = slang
+    return resulting_func

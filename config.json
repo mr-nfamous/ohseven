@@ -1,0 +1,38 @@
+{
+  "filenames": {
+    "abbreviations": "abbreviations.json",
+    "backup": "original_items.json",
+    "ge_cache": "ge_cache.json",
+    "item_data": "itemdb.json",
+    "ngrams": "ngrams.json",
+    "osb_cache": "osb_cache.json",
+    "slang": "slang.json"
+  },
+  "general_settings": {
+    "ge_autocache": false,
+    "load_ge_cache_on_import": true,
+    "load_items_on_import": true,
+    "load_osb_cache_on_import": true,
+    "osb_autocache": false
+  },
+  "hiscore_urls": {
+    "cml": "https://crystalmathlabs.com/tracker/api.php?",
+    "deadman": "http://services.runescape.com/m=hiscore_oldschool_deadman/index_lite.ws?player=%s",
+    "hardcore": "http://services.runescape.com/m=hiscore_oldschool_hardcore_ironman/index_lite.ws?player=%s",
+    "ironman": "http://services.runescape.com/m=hiscore_oldschool_ironman/index_lite.ws?player=%s",
+    "normal": "http://services.runescape.com/m=hiscore_oldschool/index_lite.ws?player=%s",
+    "seasonal": "http://services.runescape.com/m=hiscore_oldschool_seasonal/index_lite.ws?player=%s",
+    "ultimate": "http://services.runescape.com/m=hiscore_oldschool_ultimate/index_lite.ws?player=%s"
+  },
+  "item_data_urls": {
+    "ge_catalogue": "http://services.runescape.com/m=itemdb_oldschool/api/catalogue/detail.json?item=%s",
+    "ge_price_api": "http://services.runescape.com/m=itemdb_oldschool/api/graph/%s.json",
+    "osb_catalogue": "https://rsbuddy.com/exchange/summary.json",
+    "osb_price_api": "https://api.rsbuddy.com/grandExchange?a=guidePrice&i=%s"
+  },
+  "cache_settings": {
+    "osb_cache_duration": 1800,
+    "osb_auto_cache_frequency": 2000,
+    "ge_auto_cache_frequency": 6000
+  }
+}
